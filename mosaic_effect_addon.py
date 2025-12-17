@@ -10,23 +10,20 @@ bl_info = {
 
 import bpy
 from bpy.props import IntProperty, BoolProperty
-from bpy.types import Panel, PropertyGroup
-from bpy.app.handlers import persistent
+from bpy.types import Panel, PropertyGroup, Operator
 
 class MosaicProperties(PropertyGroup):
     enabled: BoolProperty(
         name="Enable Mosaic Effect",
         description="Apply mosaic effect to renders",
-        default=False,
-        update=lambda self, context: update_compositor(context)
+        default=False
     )
     pixel_size: IntProperty(
         name="Pixel Size",
-        description="Size of mosaic blocks (lower = bigger pixels)",
-        default=20,
+        description="Downscale factor (higher = bigger pixels)",
+        default=8,
         min=2,
-        max=200,
-        update=lambda self, context: update_compositor(context)
+        max=50
     )
 
 def update_compositor(context):
@@ -34,77 +31,64 @@ def update_compositor(context):
     props = scene.mosaic_props
     
     # Enable compositing
-    scene.use_nodes = True
     scene.render.use_compositing = True
     
-    # Wait for node tree to be created
-    if not hasattr(scene, 'node_tree') or scene.node_tree is None:
-        # Force creation by toggling
-        scene.use_nodes = False
-        scene.use_nodes = True
+    # Create or get compositor node group
+    if not scene.compositing_node_group:
+        tree = bpy.data.node_groups.new(name="MosaicCompositor", type='CompositorNodeTree')
+        scene.compositing_node_group = tree
+    else:
+        tree = scene.compositing_node_group
     
-    if not hasattr(scene, 'node_tree') or scene.node_tree is None:
-        print("ERROR: Cannot access compositor node tree")
-        return
-    
-    tree = scene.node_tree
-    
-    if not props.enabled:
-        # Remove mosaic nodes
-        tree.nodes.clear()
-        render_layers = tree.nodes.new('CompositorNodeRLayers')
-        composite = tree.nodes.new('CompositorNodeComposite')
-        tree.links.new(render_layers.outputs['Image'], composite.inputs['Image'])
-        return
-    
-    # Clear and rebuild
+    # Clear existing nodes and interface
     tree.nodes.clear()
+    tree.interface.clear()
     
+    # Add Render Layers input
     render_layers = tree.nodes.new('CompositorNodeRLayers')
     render_layers.location = (0, 0)
     
-    # Get render resolution
-    render_x = scene.render.resolution_x
-    render_y = scene.render.resolution_y
+    # Add Group Output
+    output = tree.nodes.new('NodeGroupOutput')
     
-    # Calculate reduced dimensions (fewer pixels = bigger blocks)
-    new_x = max(1, render_x // props.pixel_size)
-    new_y = max(1, render_y // props.pixel_size)
+    # Create output socket
+    tree.interface.new_socket(name="Image", in_out='OUTPUT', socket_type='NodeSocketColor')
     
-    # Scale down to reduced resolution
-    scale_down = tree.nodes.new('CompositorNodeScale')
-    scale_down.location = (200, 0)
-    scale_down.space = 'ABSOLUTE'
-    scale_down.inputs['X'].default_value = new_x
-    scale_down.inputs['Y'].default_value = new_y
+    if not props.enabled:
+        output.location = (200, 0)
+        tree.links.new(render_layers.outputs['Image'], output.inputs[0])
+        return
     
-    # Scale back up to original size (creates blocky pixels)
-    scale_up = tree.nodes.new('CompositorNodeScale')
-    scale_up.location = (400, 0)
-    scale_up.space = 'ABSOLUTE'
-    scale_up.inputs['X'].default_value = render_x
-    scale_up.inputs['Y'].default_value = render_y
+    # Add Pixelate node
+    pixelate = tree.nodes.new('CompositorNodePixelate')
+    pixelate.location = (200, 0)
+    pixelate.inputs['Size'].default_value = props.pixel_size
     
-    composite = tree.nodes.new('CompositorNodeComposite')
-    composite.location = (600, 0)
+    output.location = (400, 0)
     
-    tree.links.new(render_layers.outputs['Image'], scale_down.inputs[0])
-    tree.links.new(scale_down.outputs[0], scale_up.inputs[0])
-    tree.links.new(scale_up.outputs[0], composite.inputs[0])
+    # Link nodes
+    tree.links.new(render_layers.outputs['Image'], pixelate.inputs['Color'])
+    tree.links.new(pixelate.outputs['Color'], output.inputs[0])
+    
+    # Switch UI to show compositor
+    for area in context.screen.areas:
+        if area.type == 'NODE_EDITOR':
+            area.spaces.active.tree_type = 'CompositorNodeTree'
+            area.spaces.active.node_tree = tree
+            break
 
-@persistent
-def setup_on_render(scene):
-    if scene.mosaic_props.enabled:
-        update_compositor(bpy.context)
-
-class MOSAIC_OT_apply(bpy.types.Operator):
+class MOSAIC_OT_apply(Operator):
     bl_idname = "mosaic.apply"
-    bl_label = "Apply Now"
-    bl_description = "Manually apply mosaic effect to compositor"
+    bl_label = "Apply Mosaic"
+    bl_description = "Apply mosaic effect to compositor"
     
     def execute(self, context):
         update_compositor(context)
-        self.report({'INFO'}, "Mosaic effect applied to compositor")
+        props = context.scene.mosaic_props
+        if props.enabled:
+            self.report({'INFO'}, f"Mosaic applied: {props.pixel_size}x downscale")
+        else:
+            self.report({'INFO'}, "Mosaic disabled")
         return {'FINISHED'}
 
 class MOSAIC_PT_render_panel(Panel):
@@ -120,29 +104,31 @@ class MOSAIC_PT_render_panel(Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.mosaic_props
+        scene = context.scene
         
         layout.enabled = props.enabled
         layout.prop(props, "pixel_size")
-        layout.operator("mosaic.apply", icon='CHECKMARK')
-
-classes = (
-    MosaicProperties,
-    MOSAIC_OT_apply,
-    MOSAIC_PT_render_panel,
-)
+        layout.operator("mosaic.apply", icon='FILE_REFRESH')
+        
+        # Show status
+        box = layout.box()
+        box.label(text=f"Compositing: {'ON' if scene.render.use_compositing else 'OFF'}")
+        if props.enabled:
+            res_x = scene.render.resolution_x // props.pixel_size
+            res_y = scene.render.resolution_y // props.pixel_size
+            box.label(text=f"Reduced: {res_x}x{res_y} px")
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    bpy.utils.register_class(MosaicProperties)
+    bpy.utils.register_class(MOSAIC_OT_apply)
+    bpy.utils.register_class(MOSAIC_PT_render_panel)
     bpy.types.Scene.mosaic_props = bpy.props.PointerProperty(type=MosaicProperties)
-    bpy.app.handlers.render_pre.append(setup_on_render)
 
 def unregister():
-    if setup_on_render in bpy.app.handlers.render_pre:
-        bpy.app.handlers.render_pre.remove(setup_on_render)
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
     del bpy.types.Scene.mosaic_props
+    bpy.utils.unregister_class(MOSAIC_PT_render_panel)
+    bpy.utils.unregister_class(MOSAIC_OT_apply)
+    bpy.utils.unregister_class(MosaicProperties)
 
 if __name__ == "__main__":
     register()
