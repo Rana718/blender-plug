@@ -155,14 +155,27 @@ class MOSAIC_OT_add_selected(Operator):
     
     def execute(self, context):
         props = context.scene.mosaic_props
-        props.selected_objects.clear()
+        existing = {item.obj_name for item in props.selected_objects}
+        added = 0
         
         for obj in context.selected_objects:
-            if obj.type == 'MESH':
+            if obj.type == 'MESH' and obj.name not in existing:
                 item = props.selected_objects.add()
                 item.obj_name = obj.name
+                added += 1
         
-        self.report({'INFO'}, f"Added {len(props.selected_objects)} object(s)")
+        self.report({'INFO'}, f"Added {added} object(s), total: {len(props.selected_objects)}")
+        return {'FINISHED'}
+
+class MOSAIC_OT_remove_object(Operator):
+    bl_idname = "mosaic.remove_object"
+    bl_label = "Remove"
+    bl_description = "Remove object from list"
+    
+    index: IntProperty()
+    
+    def execute(self, context):
+        context.scene.mosaic_props.selected_objects.remove(self.index)
         return {'FINISHED'}
 
 class MOSAIC_OT_clear_objects(Operator):
@@ -209,12 +222,14 @@ class MOSAIC_PT_render_panel(Panel):
         box.label(text="Objects:")
         box.operator("mosaic.add_selected", icon='ADD')
         
-        for item in props.selected_objects:
+        for i, item in enumerate(props.selected_objects):
             row = box.row()
             row.label(text=item.obj_name, icon='OBJECT_DATA')
+            op = row.operator("mosaic.remove_object", text="", icon='X')
+            op.index = i
         
         if len(props.selected_objects) > 0:
-            box.operator("mosaic.clear_objects", icon='X')
+            box.operator("mosaic.clear_objects", icon='TRASH')
         
         layout.operator("mosaic.apply", icon='FILE_REFRESH')
 
@@ -222,6 +237,7 @@ def register():
     bpy.utils.register_class(MosaicObjectItem)
     bpy.utils.register_class(MosaicProperties)
     bpy.utils.register_class(MOSAIC_OT_add_selected)
+    bpy.utils.register_class(MOSAIC_OT_remove_object)
     bpy.utils.register_class(MOSAIC_OT_clear_objects)
     bpy.utils.register_class(MOSAIC_OT_apply)
     bpy.utils.register_class(MOSAIC_PT_render_panel)
@@ -232,6 +248,7 @@ def unregister():
     bpy.utils.unregister_class(MOSAIC_PT_render_panel)
     bpy.utils.unregister_class(MOSAIC_OT_apply)
     bpy.utils.unregister_class(MOSAIC_OT_clear_objects)
+    bpy.utils.unregister_class(MOSAIC_OT_remove_object)
     bpy.utils.unregister_class(MOSAIC_OT_add_selected)
     bpy.utils.unregister_class(MosaicProperties)
     bpy.utils.unregister_class(MosaicObjectItem)
